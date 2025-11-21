@@ -17,18 +17,20 @@ app.use(express.json());
 const JWT_SECRET = 'este-es-un-secreto-muy-largo-y-seguro-que-debes-cambiar';
 const PORT = process.env.PORT || 4000;
 
-// 3. CONFIGURACIÓN DE LA BASE DE DATOS
+// 3. CONFIGURACIÓN DE LA BASE DE DATOS (CORREGIDA PARA LA NUBE)
 const pool = new Pool({
-    user: 'postgres',
-    host: 'localhost',
-    database: 'mundial_2026',
-    password: '12345',
-    port: 5432,
+    connectionString: process.env.INTERNAL_DATABASE_URL || undefined, // Usa la conexión interna de Render si existe
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    port: process.env.DB_PORT || 5432,
+    ssl: process.env.DB_HOST !== 'localhost' ? { rejectUnauthorized: false } : false // SSL solo en producción
 });
 
-pool.query('SELECT NOW()', (err) => {
-    if (err) console.error('❌ Error al conectar con la base de datos:', err.stack);
-    else console.log('✅ Conexión a la base de datos "mundial_2026" exitosa.');
+pool.connect((err) => {
+    if (err) console.error('❌ Error CRÍTICO al conectar con la base de datos:', err);
+    else console.log('✅ Conexión exitosa a la base de datos PostgreSQL en la nube.');
 });
 
 // 4. MIDDLEWARE DE AUTENTICACIÓN
@@ -212,10 +214,8 @@ const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
         origin: [
-            "http://localhost:5173",
-            "http://localhost:3000",
-            // Añade tu dominio de Vercel cuando lo tengas:
-            // "https://tu-proyecto-fifa.vercel.app"
+            "http://localhost:5173", // Para cuando desarrolles en tu PC
+            "https://frontend-beta-kohl-97.vercel.app" // <--- ¡TU URL REAL DE VERCEL!
         ],
         methods: ["GET", "POST"],
         credentials: true
