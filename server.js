@@ -441,37 +441,64 @@ io.on('connection', (socket) => {
         // "El Portero": Validación de permisos
         const userId = socket.userId;
 
-        // Si la sala es un número, asumimos que es un Grupo de la BD
+        // 1. Validación básica de sesión
+        if (!userId) {
+            return socket.emit('error', 'No estás autenticado en el chat.');
+        }
+
+        // 2. Validar si es un Grupo Numérico (ID de la BD) o un UUID (Chat Privado)
+        let hasPermission = false;
+
+        // Caso A: Es un número (ID de grupo en base de datos)
         if (!isNaN(room)) {
-            if (!userId) {
-                return socket.emit('error', 'No estás autenticado en el chat.');
-            }
             try {
                 const result = await pool.query(
                     'SELECT 1 FROM group_members WHERE user_id = $1 AND group_id = $2',
                     [userId, room]
                 );
-
-                if (result.rows.length === 0) {
-                    console.log(`⛔ Acceso denegado: Usuario ${userId} intentó entrar a sala ${room}`);
-                    return socket.emit('error', 'No tienes permiso para entrar a esta sala.');
-                }
+                if (result.rows.length > 0) hasPermission = true;
             } catch (err) {
-                console.error('Error validando permisos de sala:', err);
-                return;
+                console.error('Error validando grupo:', err);
             }
         }
+        // Caso B: Es un string (UUID o ID personalizado como 'match-chat-XYZ')
+        else if (typeof room === 'string') {
+            // Si es un chat de partido (público), permitimos
+            if (room.startsWith('match-chat-')) {
+                hasPermission = true;
+            }
+            // Si es un chat privado (UUID), validamos en la tabla groups (suponiendo que uses UUIDs para privados)
+            // OJO: Si sigues usando la lógica antigua "private-1-2", aquí es donde bloquearíamos.
+            // Como ya migraste a la creación de grupos en BD, el ID debería ser numérico y caer en el Caso A.
+            // Si aún usas strings para algo más, define aquí la lógica.
+        }
 
+        // 3. Decisión del Portero
+        if (!hasPermission) {
+            console.log(`⛔ Acceso denegado: Usuario ${userId} intentó entrar a sala ${room}`);
+            return socket.emit('error', 'No tienes permiso para entrar a esta sala.');
+        }
+
+        // 4. Dejar sala anterior y unirse a la nueva
         if (currentRoom) socket.leave(currentRoom);
         socket.join(room);
         currentRoom = room;
-        console.log(`✅ Usuario ${userId || 'Anónimo'} (Socket ${socket.id}) se unió a la sala: ${room}`);
+        console.log(`✅ Usuario ${userId} (Socket ${socket.id}) se unió a la sala: ${room}`);
     });
 
     socket.on('sendMessage', async (data) => {
+        // Validación extra: ¿El usuario realmente está en la sala a la que envía?
+        if (currentRoom !== data.room) {
+            return socket.emit('error', 'No puedes enviar mensajes a una sala en la que no estás.');
+        }
+
         try {
             const { text, userId, room } = data;
-            await pool.query('INSERT INTO messages (content, user_id, group_id) VALUES ($1, $2, $3)', [text, userId, room]);
+            // Solo guardamos si es un grupo de BD (numérico)
+            if (!isNaN(room)) {
+                await pool.query('INSERT INTO messages (content, user_id, group_id) VALUES ($1, $2, $3)', [text, userId, room]);
+            }
+            // Reenviamos el mensaje a todos en la sala
             io.to(room).emit('receiveMessage', data);
         } catch (err) { console.error('❌ Error al procesar mensaje:', err); }
     });
@@ -481,11 +508,22 @@ io.on('connection', (socket) => {
         try {
             const groupResult = await pool.query('INSERT INTO groups (name, creator_id, description) VALUES ($1, $2, $3) RETURNING *', [name, creatorId, `Grupo de ${members.length} miembros`]);
             const newGroup = groupResult.rows[0];
+
+            // Añadir al creador también
+            await pool.query('INSERT INTO group_members (user_id, group_id) VALUES ($1, $2)', [creatorId, newGroup.id]);
+
             for (const memberId of members) {
                 await pool.query('INSERT INTO group_members (user_id, group_id) VALUES ($1, $2)', [memberId, newGroup.id]);
             }
             console.log(`✅ Grupo "${newGroup.name}" creado en la BD.`);
+
             const groupInfoForClient = { id: newGroup.id, name: newGroup.name, description: newGroup.description };
+
+            // Notificar al creador
+            const creatorSocketId = userSocketMap[creatorId];
+            if (creatorSocketId) io.to(creatorSocketId).emit('newGroupAdded', groupInfoForClient);
+
+            // Notificar a los miembros
             members.forEach(memberId => {
                 const memberSocketId = userSocketMap[memberId];
                 if (memberSocketId) io.to(memberSocketId).emit('newGroupAdded', groupInfoForClient);
