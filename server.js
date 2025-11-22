@@ -1,4 +1,4 @@
-// backend/server.js - VERSIÓN FINAL Y COMPLETA
+// backend/server.js - VERSIÓN CORREGIDA Y SEGURA
 
 // 1. IMPORTACIONES DE MÓDULOS
 const express = require('express');
@@ -8,13 +8,14 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
 
 // 2. CONFIGURACIÓN INICIAL
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-const JWT_SECRET = 'este-es-un-secreto-muy-largo-y-seguro-que-debes-cambiar';
+// SEGURIDAD: JWT_SECRET desde variable de entorno
+const JWT_SECRET = process.env.JWT_SECRET || 'este-es-un-secreto-muy-largo-y-seguro-que-debes-cambiar';
 const PORT = process.env.PORT || 4000;
 
 // 3. CONFIGURACIÓN DE LA BASE DE DATOS
@@ -24,10 +25,9 @@ const pool = new Pool({
     connectionString: process.env.INTERNAL_DATABASE_URL || undefined,
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || '12345', // Tu contraseña local
+    password: process.env.DB_PASSWORD || '12345',
     database: process.env.DB_NAME || 'mundial_2026',
     port: process.env.DB_PORT || 5432,
-    // SOLUCIÓN AQUÍ: Solo activamos SSL si NO estamos en localhost
     ssl: isProduction ? { rejectUnauthorized: false } : false
 });
 
@@ -52,7 +52,19 @@ function authenticateToken(req, res, next) {
     });
 }
 
-// 5. ENDPOINTS DE LA API (RUTAS HTTP)
+// 5. CONFIGURACIÓN DE CORS (CORREGIDO - Solo una vez)
+const allowedOrigins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://frontend-kgb9esxzd-charlies-projects-1a4acc00.vercel.app"
+];
+
+app.use(cors({
+    origin: allowedOrigins,
+    credentials: true
+}));
+
+// 6. ENDPOINTS DE LA API (RUTAS HTTP)
 app.post('/api/register', async (req, res) => {
     const { username, email, password } = req.body;
     if (!username || !email || !password) return res.status(400).json({ message: 'Por favor, completa todos los campos.' });
@@ -100,7 +112,7 @@ app.get('/api/messages/:room', authenticateToken, async (req, res) => {
     try {
         const { room } = req.params;
         const query = `
-            SELECT m.id, m.content as text, m.sent_at as time, u.id as "userId", u.username as user
+            SELECT m.id, m.content as text, m.sent_at as time, m.image_url, u.id as "userId", u.username as user
             FROM messages m JOIN users u ON m.user_id = u.id
             WHERE m.group_id = $1 ORDER BY m.sent_at ASC;`;
         const result = await pool.query(query, [room]);
@@ -111,10 +123,9 @@ app.get('/api/messages/:room', authenticateToken, async (req, res) => {
     }
 });
 
-// NUEVO ENDPOINT PARA INICIAR/OBTENER CHAT PRIVADO
 app.post('/api/chat/private/initiate', authenticateToken, async (req, res) => {
-    const initiatorUserId = req.user.userId; // ID del usuario que inicia el chat (del token)
-    const { targetUserId } = req.body; // ID del usuario con quien se quiere chatear
+    const initiatorUserId = req.user.userId;
+    const { targetUserId } = req.body;
 
     if (!targetUserId) {
         return res.status(400).json({ message: 'Falta el ID del usuario destino (targetUserId).' });
@@ -124,10 +135,9 @@ app.post('/api/chat/private/initiate', authenticateToken, async (req, res) => {
         return res.status(400).json({ message: 'No puedes iniciar un chat contigo mismo.' });
     }
 
-    const client = await pool.connect(); // Usaremos un cliente para transacciones
+    const client = await pool.connect();
 
     try {
-        // PASO 1: Buscar si ya existe un grupo privado entre estos dos usuarios
         const findGroupQuery = `
             SELECT gm.group_id
             FROM group_members gm
@@ -141,49 +151,41 @@ app.post('/api/chat/private/initiate', authenticateToken, async (req, res) => {
         const groupResult = await client.query(findGroupQuery, [initiatorUserId, targetUserId]);
 
         if (groupResult.rows.length > 0) {
-            // Ya existe un grupo privado, devolvemos su ID
             const existingGroupId = groupResult.rows[0].group_id;
             console.log(`✅ Chat privado encontrado entre ${initiatorUserId} y ${targetUserId}. ID: ${existingGroupId}`);
             res.status(200).json({ groupId: existingGroupId });
         } else {
-            // PASO 2: No existe, creamos uno nuevo DENTRO DE UNA TRANSACCIÓN
-            await client.query('BEGIN'); // Iniciar transacción
+            await client.query('BEGIN');
 
-            // Crear el grupo
             const createGroupQuery = `
                 INSERT INTO groups (name, creator_id, is_private)
                 VALUES ($1, $2, true)
                 RETURNING id;
             `;
-            // Podrías generar un nombre más descriptivo si quisieras
             const groupName = `Chat Privado ${initiatorUserId}-${targetUserId}`;
             const newGroupResult = await client.query(createGroupQuery, [groupName, initiatorUserId]);
             const newGroupId = newGroupResult.rows[0].id;
 
-            // Añadir ambos miembros al grupo
             const addMembersQuery = `
                 INSERT INTO group_members (user_id, group_id) VALUES ($1, $2), ($3, $2);
             `;
             await client.query(addMembersQuery, [initiatorUserId, newGroupId, targetUserId]);
 
-            await client.query('COMMIT'); // Finalizar transacción si todo fue bien
+            await client.query('COMMIT');
 
             console.log(`✅ Nuevo chat privado creado entre ${initiatorUserId} y ${targetUserId}. ID: ${newGroupId}`);
-            res.status(201).json({ groupId: newGroupId }); // 201 Created
+            res.status(201).json({ groupId: newGroupId });
         }
 
     } catch (err) {
-        await client.query('ROLLBACK'); // Deshacer transacción en caso de error
+        await client.query('ROLLBACK');
         console.error('❌ Error al iniciar/obtener chat privado:', err);
         res.status(500).json({ message: 'Error interno del servidor al gestionar chat privado.' });
     } finally {
-        client.release(); // Liberar el cliente de la pool
+        client.release();
     }
 });
 
-// --- FIN DEL NUEVO ENDPOINT ---
-
-// ENDPOINT PARA OBTENER LA LISTA DE PARTIDOS
 app.get('/api/matches', authenticateToken, async (req, res) => {
     try {
         const query = `
@@ -202,12 +204,11 @@ app.get('/api/matches', authenticateToken, async (req, res) => {
     }
 });
 
-// ENDPOINT PARA INICIAR LA SIMULACIÓN DE UN PARTIDO (solo para admins en un futuro)
 app.post('/api/matches/simulate/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
         await pool.query("UPDATE matches SET status = 'live' WHERE id = $1", [id]);
-        startSimulation(parseInt(id)); // Inicia el motor de simulación para este partido
+        startSimulation(parseInt(id));
         res.status(200).json({ message: `Simulación del partido ${id} iniciada.` });
     } catch (err) {
         console.error(`❌ Error al iniciar simulación para el partido ${id}:`, err);
@@ -215,21 +216,179 @@ app.post('/api/matches/simulate/:id', authenticateToken, async (req, res) => {
     }
 });
 
-// 6. CONFIGURACIÓN DEL SERVIDOR Y SOCKET.IO
+// CONFIGURACIÓN DE NODEMAILER (Movido fuera de socket.io)
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
+
+// ENDPOINT PARA ENVIAR CORREO (Movido fuera de socket.io)
+app.post('/api/email/send', authenticateToken, async (req, res) => {
+    const { targetUserId, subject, message } = req.body;
+    const senderEmail = process.env.EMAIL_USER;
+
+    if (!targetUserId || !subject || !message) {
+        return res.status(400).json({ message: 'Faltan datos.' });
+    }
+
+    try {
+        const userRes = await pool.query('SELECT email, username FROM users WHERE id = $1', [targetUserId]);
+
+        if (userRes.rows.length === 0) {
+            return res.status(404).json({ message: 'Usuario no encontrado.' });
+        }
+
+        const targetEmail = userRes.rows[0].email;
+        const targetName = userRes.rows[0].username;
+
+        const mailOptions = {
+            from: `"Simulador FIFA 2026" <${senderEmail}>`,
+            to: targetEmail,
+            subject: `Mensaje de ${req.user.username}: ${subject}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
+                    <h2 style="color: #0066b3;">¡Hola ${targetName}!</h2>
+                    <p>El usuario <strong>${req.user.username}</strong> te ha enviado un mensaje desde la plataforma:</p>
+                    <hr>
+                    <p style="font-size: 16px; color: #333;">${message}</p>
+                    <hr>
+                    <small style="color: #888;">No respondas a este correo directamente.</small>
+                </div>
+            `
+        };
+
+        await transporter.sendMail(mailOptions);
+        res.json({ message: 'Correo enviado exitosamente.' });
+
+    } catch (error) {
+        console.error("Error enviando correo:", error);
+        res.status(500).json({ message: 'Error al enviar el correo.' });
+    }
+});
+
+// ENDPOINTS DE SETUP (Protegidos - Solo para desarrollo)
+if (process.env.NODE_ENV !== 'production') {
+    app.get('/setup-database', async (req, res) => {
+        try {
+            await pool.query(`
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(50) UNIQUE NOT NULL,
+                    email VARCHAR(100) UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    is_online BOOLEAN DEFAULT FALSE,
+                    points INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS groups (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100),
+                    description TEXT,
+                    is_private BOOLEAN DEFAULT FALSE,
+                    creator_id INTEGER REFERENCES users(id),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS group_members (
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, group_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    id SERIAL PRIMARY KEY,
+                    content TEXT,
+                    image_url TEXT,
+                    user_id INTEGER REFERENCES users(id),
+                    group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+                    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id SERIAL PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    is_completed BOOLEAN DEFAULT FALSE,
+                    group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS teams (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(50) NOT NULL,
+                    rating INTEGER DEFAULT 70,
+                    discipline INTEGER DEFAULT 80
+                );
+
+                CREATE TABLE IF NOT EXISTS stadiums (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100),
+                    factor_clima VARCHAR(20)
+                );
+
+                CREATE TABLE IF NOT EXISTS matches (
+                    id SERIAL PRIMARY KEY,
+                    local_team_id INTEGER REFERENCES teams(id),
+                    visitor_team_id INTEGER REFERENCES teams(id),
+                    score_local INTEGER DEFAULT 0,
+                    score_visitor INTEGER DEFAULT 0,
+                    status VARCHAR(20) DEFAULT 'scheduled',
+                    stadium_id INTEGER REFERENCES stadiums(id),
+                    match_date TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS match_logs (
+                    id SERIAL PRIMARY KEY,
+                    match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE,
+                    minute INTEGER,
+                    event_text TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS user_badges (
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    badge_code VARCHAR(50),
+                    awarded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            `);
+
+            await pool.query(`
+                INSERT INTO teams (name, rating) VALUES 
+                ('Argentina', 95), ('Francia', 94), ('Brasil', 93), 
+                ('México', 80), ('Alemania', 88), ('Japón', 78),
+                ('España', 89), ('Inglaterra', 90)
+                ON CONFLICT DO NOTHING;
+
+                INSERT INTO stadiums (name, factor_clima) VALUES 
+                ('Estadio Azteca', 'calor'), ('Wembley', 'lluvia'), ('Lusail', 'soleado')
+                ON CONFLICT DO NOTHING;
+            `);
+
+            res.send(`
+                <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+                    <h1 style="color: green;">✅ Base de Datos Instalada Correctamente</h1>
+                    <p>Se han creado las tablas: users, groups, messages, tasks, teams, matches, etc.</p>
+                    <p>Ya puedes usar la aplicación.</p>
+                </div>
+            `);
+
+        } catch (err) {
+            console.error(err);
+            res.status(500).send(`
+                <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+                    <h1 style="color: red;">❌ Error en la instalación</h1>
+                    <p>${err.message}</p>
+                </div>
+            `);
+        }
+    });
+}
+
+// 7. CONFIGURACIÓN DEL SERVIDOR Y SOCKET.IO
 const server = http.createServer(app);
-
-// Define la lista de orígenes permitidos (PARA EXPRESS Y SOCKET.IO)
-const allowedOrigins = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "https://frontend-kgb9esxzd-charlies-projects-1a4acc00.vercel.app" // <--- ¡TU URL DE VERCEL!
-];
-
-// Configura CORS para Express también (para que funcione el registro)
-app.use(cors({
-    origin: allowedOrigins,
-    credentials: true
-}));
 
 const io = new Server(server, {
     cors: {
@@ -239,30 +398,20 @@ const io = new Server(server, {
     }
 });
 
-// AÑADIR ESTE BLOQUE ANTES DE LA LÓGICA DE SOCKET.IO
+// MAPA DE USUARIOS CONECTADOS (RESTAURADO)
+const userSocketMap = {};
 
-// --- 6. MOTOR DE SIMULACIÓN DE PARTIDOS (Versión PDF) ---
-
-// activeSimulations guardará el ESTADO COMPLETO de cada partido en vivo.
+// 8. MOTOR DE SIMULACIÓN DE PARTIDOS
 const activeSimulations = {};
 
-/**
- * Detiene el intervalo de simulación y limpia la memoria.
- */
 function stopSimulation(matchId) {
     if (activeSimulations[matchId] && activeSimulations[matchId].intervalId) {
-        // CAMBIO: Ahora limpiamos un setTimeout, no un setInterval
-        // Usamos clearTimeout en lugar de clearInterval
         clearTimeout(activeSimulations[matchId].intervalId);
         delete activeSimulations[matchId];
         console.log(`⏹️ Simulación para el partido ${matchId} detenida.`);
     }
 }
 
-/**
- * Inicia la simulación.
- * (Esta es la NUEVA versión de startSimulation)
- */
 async function startSimulation(matchId) {
     if (activeSimulations[matchId]) return;
     console.log(`▶️ Iniciando simulación para el partido ${matchId}...`);
@@ -311,8 +460,6 @@ async function startSimulation(matchId) {
         };
 
         activeSimulations[matchId] = simulationState;
-
-        // Llamamos al primer tick
         simulateTick(matchId);
 
     } catch (err) {
@@ -320,11 +467,6 @@ async function startSimulation(matchId) {
     }
 }
 
-
-/**
- * El corazón del motor de simulación.
- * (Esta es la NUEVA versión de simulateTick)
- */
 async function simulateTick(matchId) {
     const state = activeSimulations[matchId];
     if (!state) return stopSimulation(matchId);
@@ -335,7 +477,6 @@ async function simulateTick(matchId) {
     let eventText = `Minuto ${state.currentMinute}: El partido sigue disputado en el mediocampo.`;
 
     try {
-        // 1. CALCULAR PODER ACTUAL
         const room = io.sockets.adapter.rooms.get(roomName);
         const userCount = room ? room.size : 0;
         const chatMoralBonus = Math.floor(userCount / 5);
@@ -349,7 +490,6 @@ async function simulateTick(matchId) {
         const powerVisitor = (state.visitorTeam.baseRating + state.visitorTeam.moral - state.visitorTeam.discipline_penalty - climatePenalty) * state.pressure;
         const totalPower = Math.max(1, powerLocal + powerVisitor);
 
-        // 2. GENERAR EVENTOS
         const rand = Math.random();
         const localChance = powerLocal / totalPower;
 
@@ -381,10 +521,9 @@ async function simulateTick(matchId) {
             }
 
         } else if (rand < CHANCE_GOAL + CHANCE_YELLOW + CHANCE_RED) {
-            // Evento: Tarjeta Roja
             const disciplineRatio = state.localTeam.discipline / (state.localTeam.discipline + state.visitorTeam.discipline);
             if (Math.random() < disciplineRatio) {
-                state.localTeam.discipline_penalty += 20; // Penalidad mayor
+                state.localTeam.discipline_penalty += 20;
                 eventText = `¡TARJETA ROJA! ${state.localTeam.name} se queda con 10.`;
             } else {
                 state.visitorTeam.discipline_penalty += 20;
@@ -403,7 +542,6 @@ async function simulateTick(matchId) {
             }
         }
 
-        // 3. ACTUALIZAR MARCADOR Y GUARDAR LOG
         await pool.query('INSERT INTO match_logs (match_id, minute, event_text) VALUES ($1, $2, $3)', [matchId, state.currentMinute, eventText]);
 
         io.to(roomName).emit('match-update', {
@@ -415,7 +553,6 @@ async function simulateTick(matchId) {
             visitor_moral: state.visitorTeam.moral
         });
 
-        // 4. FINALIZAR O CONTINUAR
         if (state.currentMinute >= 90) {
             await pool.query("UPDATE matches SET status = 'finished' WHERE id = $1", [matchId]);
             stopSimulation(matchId);
@@ -424,7 +561,6 @@ async function simulateTick(matchId) {
                 final_score: { local: state.score_local, visitor: state.score_visitor }
             });
         } else {
-            // Agendamos el próximo tick
             state.intervalId = setTimeout(() => simulateTick(matchId), 2000);
             activeSimulations[matchId] = state;
         }
@@ -435,14 +571,13 @@ async function simulateTick(matchId) {
     }
 }
 
-// 7. LÓGICA DE SOCKET.IO (CHAT EN TIEMPO REAL)
+// 9. LÓGICA DE SOCKET.IO (CHAT EN TIEMPO REAL)
 io.on('connection', (socket) => {
     console.log(`🔌 Usuario conectado al chat: ${socket.id}`);
     let currentRoom = '';
 
-    // --- Lógica de Chat y Grupos ---
     socket.on('registerUser', async (userId) => {
-        socket.userId = userId; // Guardamos el ID en el socket para validaciones futuras
+        socket.userId = userId;
         userSocketMap[userId] = socket.id;
         console.log(`Usuario ${userId} registrado con socket ${socket.id}`);
         try {
@@ -454,18 +589,14 @@ io.on('connection', (socket) => {
     });
 
     socket.on('joinRoom', async (room) => {
-        // "El Portero": Validación de permisos
         const userId = socket.userId;
 
-        // 1. Validación básica de sesión
         if (!userId) {
             return socket.emit('error', 'No estás autenticado en el chat.');
         }
 
-        // 2. Validar si es un Grupo Numérico (ID de la BD) o un UUID (Chat Privado)
         let hasPermission = false;
 
-        // Caso A: Es un número (ID de grupo en base de datos)
         if (!isNaN(room)) {
             try {
                 const result = await pool.query(
@@ -476,26 +607,17 @@ io.on('connection', (socket) => {
             } catch (err) {
                 console.error('Error validando grupo:', err);
             }
-        }
-        // Caso B: Es un string (UUID o ID personalizado como 'match-chat-XYZ')
-        else if (typeof room === 'string') {
-            // Si es un chat de partido (público), permitimos
+        } else if (typeof room === 'string') {
             if (room.startsWith('match-chat-')) {
                 hasPermission = true;
             }
-            // Si es un chat privado (UUID), validamos en la tabla groups (suponiendo que uses UUIDs para privados)
-            // OJO: Si sigues usando la lógica antigua "private-1-2", aquí es donde bloquearíamos.
-            // Como ya migraste a la creación de grupos en BD, el ID debería ser numérico y caer en el Caso A.
-            // Si aún usas strings para algo más, define aquí la lógica.
         }
 
-        // 3. Decisión del Portero
         if (!hasPermission) {
             console.log(`⛔ Acceso denegado: Usuario ${userId} intentó entrar a sala ${room}`);
             return socket.emit('error', 'No tienes permiso para entrar a esta sala.');
         }
 
-        // 4. Dejar sala anterior y unirse a la nueva
         if (currentRoom) socket.leave(currentRoom);
         socket.join(room);
         currentRoom = room;
@@ -503,18 +625,19 @@ io.on('connection', (socket) => {
     });
 
     socket.on('sendMessage', async (data) => {
-        // Validación extra: ¿El usuario realmente está en la sala a la que envía?
         if (currentRoom !== data.room) {
             return socket.emit('error', 'No puedes enviar mensajes a una sala en la que no estás.');
         }
 
         try {
-            const { text, userId, room } = data;
-            // Solo guardamos si es un grupo de BD (numérico)
+            const { text, userId, room, image } = data;
+
             if (!isNaN(room)) {
-                await pool.query('INSERT INTO messages (content, user_id, group_id) VALUES ($1, $2, $3)', [text, userId, room]);
+                await pool.query(
+                    'INSERT INTO messages (content, user_id, group_id, image_url) VALUES ($1, $2, $3, $4)',
+                    [text || '', userId, room, image || null]
+                );
             }
-            // Reenviamos el mensaje a todos en la sala
             io.to(room).emit('receiveMessage', data);
         } catch (err) { console.error('❌ Error al procesar mensaje:', err); }
     });
@@ -525,21 +648,17 @@ io.on('connection', (socket) => {
             const groupResult = await pool.query('INSERT INTO groups (name, creator_id, description) VALUES ($1, $2, $3) RETURNING *', [name, creatorId, `Grupo de ${members.length} miembros`]);
             const newGroup = groupResult.rows[0];
 
-            // Añadir al creador también
             await pool.query('INSERT INTO group_members (user_id, group_id) VALUES ($1, $2)', [creatorId, newGroup.id]);
 
             for (const memberId of members) {
                 await pool.query('INSERT INTO group_members (user_id, group_id) VALUES ($1, $2)', [memberId, newGroup.id]);
             }
             console.log(`✅ Grupo "${newGroup.name}" creado en la BD.`);
-
             const groupInfoForClient = { id: newGroup.id, name: newGroup.name, description: newGroup.description };
 
-            // Notificar al creador
             const creatorSocketId = userSocketMap[creatorId];
             if (creatorSocketId) io.to(creatorSocketId).emit('newGroupAdded', groupInfoForClient);
 
-            // Notificar a los miembros
             members.forEach(memberId => {
                 const memberSocketId = userSocketMap[memberId];
                 if (memberSocketId) io.to(memberSocketId).emit('newGroupAdded', groupInfoForClient);
@@ -547,7 +666,6 @@ io.on('connection', (socket) => {
         } catch (err) { console.error("Error al crear grupo en BD:", err); }
     });
 
-    // --- Lógica de Videollamada (Señalización) ---
     socket.on('solicitud-de-llamada', (data) => {
         const { targetId, room, from } = data;
         const targetSocketId = userSocketMap[targetId];
@@ -574,7 +692,6 @@ io.on('connection', (socket) => {
     socket.on('answer', (payload) => io.to(payload.target).emit('answer', payload));
     socket.on('ice-candidate', (incoming) => io.to(incoming.target).emit('ice-candidate', incoming.candidate));
 
-    // --- Desconexión ---
     socket.on('disconnect', () => {
         for (const userId in userSocketMap) {
             if (userSocketMap[userId] === socket.id) {
@@ -586,7 +703,6 @@ io.on('connection', (socket) => {
         console.log(`🔌 Usuario desconectado del chat: ${socket.id}`);
     });
 
-    // --- Lógica de Simulación de Partidos ---
     socket.on('join-match-chat', (matchId) => {
         const roomName = `match-chat-${matchId}`;
         socket.join(roomName);
@@ -598,10 +714,11 @@ io.on('connection', (socket) => {
         socket.leave(roomName);
         console.log(`Usuario ${socket.id} abandonó la transmisión del partido ${matchId}`);
     });
-
 });
 
-// 8. INICIAR EL SERVIDOR
+// 10. INICIAR EL SERVIDOR
 server.listen(PORT, () => {
     console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
+    console.log(`🔒 Modo: ${isProduction ? 'PRODUCCIÓN' : 'DESARROLLO'}`);
+    console.log(`🌐 CORS permitido para: ${allowedOrigins.join(', ')}`);
 });
