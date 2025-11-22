@@ -579,6 +579,11 @@ io.on('connection', (socket) => {
     socket.on('registerUser', async (userId) => {
         socket.userId = userId;
         userSocketMap[userId] = socket.id;
+
+        await pool.query('UPDATE users SET is_online = TRUE WHERE id = $1', [userId]);
+
+        // 2. Avisar a todos que este usuario está ONLINE
+        io.emit('user_status_change', { userId, status: 'online' });
         console.log(`Usuario ${userId} registrado con socket ${socket.id}`);
         try {
             const result = await pool.query(`
@@ -692,15 +697,20 @@ io.on('connection', (socket) => {
     socket.on('answer', (payload) => io.to(payload.target).emit('answer', payload));
     socket.on('ice-candidate', (incoming) => io.to(incoming.target).emit('ice-candidate', incoming.candidate));
 
-    socket.on('disconnect', () => {
-        for (const userId in userSocketMap) {
-            if (userSocketMap[userId] === socket.id) {
-                delete userSocketMap[userId];
-                console.log(`🧹 Usuario ${userId} eliminado del mapa.`);
-                break;
-            }
+    socket.on('disconnect', async () => {
+        // Buscar quién era este socket
+        const userId = Object.keys(userSocketMap).find(key => userSocketMap[key] === socket.id);
+
+        if (userId) {
+            // 1. Actualizar BD
+            await pool.query('UPDATE users SET is_online = FALSE WHERE id = $1', [userId]);
+
+            // 2. Avisar a todos que este usuario está OFFLINE
+            io.emit('user_status_change', { userId, status: 'offline' });
+
+            delete userSocketMap[userId];
+            console.log(`Usuario ${userId} desconectado.`);
         }
-        console.log(`🔌 Usuario desconectado del chat: ${socket.id}`);
     });
 
     socket.on('join-match-chat', (matchId) => {
@@ -713,6 +723,32 @@ io.on('connection', (socket) => {
         const roomName = `match-chat-${matchId}`;
         socket.leave(roomName);
         console.log(`Usuario ${socket.id} abandonó la transmisión del partido ${matchId}`);
+    });
+
+    socket.on('leave-video-room', (roomName) => {
+        socket.leave(roomName);
+        socket.to(roomName).emit('user-left', socket.id);
+    });
+
+    // --- RUTA PARA BORRAR TODO Y EMPEZAR DE CERO ---
+    app.get('/reset-db-force', async (req, res) => {
+        try {
+            await pool.query(`
+            DROP TABLE IF EXISTS match_logs CASCADE;
+            DROP TABLE IF EXISTS matches CASCADE;
+            DROP TABLE IF EXISTS stadiums CASCADE;
+            DROP TABLE IF EXISTS teams CASCADE;
+            DROP TABLE IF EXISTS tasks CASCADE;
+            DROP TABLE IF EXISTS messages CASCADE;
+            DROP TABLE IF EXISTS group_members CASCADE;
+            DROP TABLE IF EXISTS groups CASCADE;
+            DROP TABLE IF EXISTS user_badges CASCADE;
+            DROP TABLE IF EXISTS users CASCADE;
+        `);
+            res.send("<h1>💣 Base de datos borrada totalmente.</h1><p>Ahora ve a <a href='/setup-database'>/setup-database</a> para reinstalar.</p>");
+        } catch (err) {
+            res.status(500).send(err.message);
+        }
     });
 });
 
