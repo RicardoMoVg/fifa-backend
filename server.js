@@ -217,19 +217,27 @@ app.post('/api/matches/simulate/:id', authenticateToken, async (req, res) => {
 
 // 6. CONFIGURACIÓN DEL SERVIDOR Y SOCKET.IO
 const server = http.createServer(app);
+
+// Define la lista de orígenes permitidos (PARA EXPRESS Y SOCKET.IO)
+const allowedOrigins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://frontend-beta-kohl-97.vercel.app" // <--- ¡TU URL DE VERCEL!
+];
+
+// Configura CORS para Express también (para que funcione el registro)
+app.use(cors({
+    origin: allowedOrigins,
+    credentials: true
+}));
+
 const io = new Server(server, {
     cors: {
-        origin: [
-            "http://localhost:5173",
-            "http://localhost:3000",
-            // AQUI PEGA TU URL REAL DE VERCEL (Entre comillas y con coma al final)
-            "https://frontend-beta-kohl-97.vercel.app",
-        ],
+        origin: allowedOrigins,
         methods: ["GET", "POST"],
         credentials: true
     }
 });
-const userSocketMap = {};
 
 // AÑADIR ESTE BLOQUE ANTES DE LA LÓGICA DE SOCKET.IO
 
