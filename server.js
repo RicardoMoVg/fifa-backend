@@ -17,20 +17,26 @@ app.use(express.json());
 const JWT_SECRET = 'este-es-un-secreto-muy-largo-y-seguro-que-debes-cambiar';
 const PORT = process.env.PORT || 4000;
 
-// 3. CONFIGURACIÓN DE LA BASE DE DATOS (CORREGIDA PARA LA NUBE)
+// 3. CONFIGURACIÓN DE LA BASE DE DATOS
+const isProduction = process.env.NODE_ENV === 'production' || (process.env.DB_HOST && process.env.DB_HOST !== 'localhost');
+
 const pool = new Pool({
-    connectionString: process.env.INTERNAL_DATABASE_URL || undefined, // Usa la conexión interna de Render si existe
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
+    connectionString: process.env.INTERNAL_DATABASE_URL || undefined,
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '12345', // Tu contraseña local
+    database: process.env.DB_NAME || 'mundial_2026',
     port: process.env.DB_PORT || 5432,
-    ssl: process.env.DB_HOST !== 'localhost' ? { rejectUnauthorized: false } : false // SSL solo en producción
+    // SOLUCIÓN AQUÍ: Solo activamos SSL si NO estamos en localhost
+    ssl: isProduction ? { rejectUnauthorized: false } : false
 });
 
 pool.connect((err) => {
-    if (err) console.error('❌ Error CRÍTICO al conectar con la base de datos:', err);
-    else console.log('✅ Conexión exitosa a la base de datos PostgreSQL en la nube.');
+    if (err) {
+        console.error('❌ Error CRÍTICO al conectar con la base de datos:', err.message);
+    } else {
+        console.log('✅ Conexión exitosa a la base de datos PostgreSQL (' + (isProduction ? 'Nube' : 'Local') + ').');
+    }
 });
 
 // 4. MIDDLEWARE DE AUTENTICACIÓN
@@ -214,8 +220,10 @@ const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
         origin: [
-            "http://localhost:5173", // Para cuando desarrolles en tu PC
-            "https://frontend-beta-kohl-97.vercel.app" // <--- ¡TU URL REAL DE VERCEL!
+            "http://localhost:5173",
+            "http://localhost:3000",
+            // AQUI PEGA TU URL REAL DE VERCEL (Entre comillas y con coma al final)
+            "https://frontend-beta-kohl-97.vercel.app",
         ],
         methods: ["GET", "POST"],
         credentials: true
