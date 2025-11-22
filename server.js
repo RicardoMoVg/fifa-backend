@@ -222,7 +222,7 @@ const server = http.createServer(app);
 const allowedOrigins = [
     "http://localhost:5173",
     "http://localhost:3000",
-    "https://frontend-beta-kohl-97.vercel.app" // <--- ¡TU URL DE VERCEL!
+    "https://frontend-kgb9esxzd-charlies-projects-1a4acc00.vercel.app" // <--- ¡TU URL DE VERCEL!
 ];
 
 // Configura CORS para Express también (para que funcione el registro)
